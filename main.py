@@ -26,23 +26,6 @@ ORDERS_CATALOG: List[Dict[str, Any]] = [
 idempotency_store: Dict[str, Dict[str, Any]] = {}
 rate_limit_store: Dict[str, List[float]] = {}
 
-
-def check_rate_limit(client_id: str) -> bool:
-    now = time.time()
-    if client_id not in rate_limit_store:
-        rate_limit_store[client_id] = []
-
-    timestamps = [t for t in rate_limit_store[client_id] if now - t < WINDOW]
-
-    if len(timestamps) >= R:
-        rate_limit_store[client_id] = timestamps
-        return False
-
-    timestamps.append(now)
-    rate_limit_store[client_id] = timestamps
-    return True
-
-
 def rate_limit_response():
     return JSONResponse(
         status_code=429,
@@ -50,11 +33,19 @@ def rate_limit_response():
         headers={"Retry-After": "10"},
     )
 
+def check_rate_limit(client_id: str) -> bool:
+    now = time.time()
+    if client_id not in rate_limit_store:
+        rate_limit_store[client_id] = []
+    rate_limit_store[client_id] = [t for t in rate_limit_store[client_id] if now - t < WINDOW]
+    if len(rate_limit_store[client_id]) >= R:
+        return False
+    rate_limit_store[client_id].append(now)
+    return True
 
 def get_page(limit: int, cursor: Optional[str]):
     if limit <= 0:
         raise HTTPException(status_code=400, detail="limit must be > 0")
-
     if cursor is None:
         start_index = 0
     else:
@@ -62,25 +53,17 @@ def get_page(limit: int, cursor: Optional[str]):
             cursor_id = int(cursor)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid cursor")
-
         start_index = None
         for idx, order in enumerate(ORDERS_CATALOG):
             if order["id"] == cursor_id:
                 start_index = idx
                 break
-
         if start_index is None:
             raise HTTPException(status_code=400, detail="Invalid cursor")
-
     end_index = start_index + limit
     items = ORDERS_CATALOG[start_index:end_index]
-
-    next_cursor = None
-    if end_index < len(ORDERS_CATALOG):
-        next_cursor = str(ORDERS_CATALOG[end_index]["id"])
-
+    next_cursor = str(ORDERS_CATALOG[end_index]["id"]) if end_index < len(ORDERS_CATALOG) else None
     return items, next_cursor
-
 
 @app.post("/orders")
 async def create_order(request: Request):
@@ -96,14 +79,9 @@ async def create_order(request: Request):
         return JSONResponse(status_code=201, content=idempotency_store[idempotency_key])
 
     new_id = len(idempotency_store) + T + 1
-    order = {
-        "id": new_id,
-        "name": f"New Order {new_id}",
-        "status": "created",
-    }
+    order = {"id": new_id, "name": f"New Order {new_id}", "status": "created"}
     idempotency_store[idempotency_key] = order
     return JSONResponse(status_code=201, content=order)
-
 
 @app.get("/orders")
 async def list_orders(limit: int = 10, cursor: Optional[str] = None, request: Request = None):
